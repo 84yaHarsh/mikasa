@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import axios from "axios";
+import mongoose from "mongoose";
 
 dotenv.config();
 
@@ -9,140 +10,158 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-console.log("API KEY:", process.env.GROQ_API_KEY ? "Loaded ✅" : "Missing ❌");
+// =========================
+// ✅ DB MODEL
+// =========================
+const chatSchema = new mongoose.Schema(
+  {
+    userMessage: String,
+    aiReply: String,
+    emotion: String,
+  },
+  { timestamps: true }
+);
 
-// 🧠 helper for human-like delay
-const delay = (ms) => new Promise((res) => setTimeout(res, ms));
+const Chat = mongoose.model("Chat", chatSchema);
 
-// 🎲 random delay (more human)
-const humanDelay = async () => {
-  const ms = Math.floor(Math.random() * 1000) + 500; // 500–1500ms
-  await delay(ms);
+// =========================
+// ✅ CONNECT DB
+// =========================
+mongoose
+  .connect(process.env.MONGO_URL)
+  .then(() => console.log("MongoDB Connected ✅"))
+  .catch((err) => console.log("Mongo Error:", err.message));
+
+// =========================
+// 🧠 EMOTION DETECTOR
+// =========================
+const detectEmotion = (text) => {
+  const t = text.toLowerCase();
+
+  if (t.includes("sad")) return "sad";
+  if (t.includes("happy")) return "happy";
+  if (t.includes("love")) return "love";
+  if (t.includes("angry")) return "angry";
+  if (t.includes("lonely")) return "lonely";
+
+  return "neutral";
 };
 
+// =========================
+// 🚀 CHAT ROUTE
+// =========================
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, history = [] } = req.body;
-    const text = message.toLowerCase();
+    const { message } = req.body;
 
-    // =========================
-    // 🧠 HYBRID SYSTEM (WITH DELAY)
-    // =========================
-    if (text === "hi" || text === "hello") {
-      await humanDelay();
-      return res.json({ reply: "hey 😊 what are you doing?" });
+    if (!message) {
+      return res.status(400).json({ error: "Message required" });
     }
 
-    if (text.includes("how are you")) {
-      await humanDelay();
-      return res.json({
-        reply: "i’m good… just chilling 😊 what about you?"
-      });
+    const emotion = detectEmotion(message);
+
+    // ✅ SAFE DB (no crash)
+    let history = [];
+    try {
+      history = await Chat.find().sort({ createdAt: -1 }).limit(5);
+    } catch (err) {
+      console.log("DB ERROR:", err.message);
     }
 
-    if (text.includes("bye")) {
-      await humanDelay();
-      return res.json({
-        reply: "bye… don’t disappear okay? 💛"
-      });
-    }
+    const context = history
+      .map((c) => `User: ${c.userMessage} | Mikasa: ${c.aiReply}`)
+      .join("\n");
 
-    if (text.includes("sad")) {
-      await humanDelay();
-      return res.json({
-        reply: "hey… what happened? you can tell me 💛"
-      });
-    }
-
-    if (text.includes("miss you")) {
-      await humanDelay();
-      return res.json({ reply: "aww… that’s sweet 💛 i’m here na" });
-    }
-
-    if (text.includes("love you")) {
-      await humanDelay();
-      return res.json({ reply: "hmm… really? 😊" });
-    }
-
-    if (text.includes("lonely")) {
-      await humanDelay();
-      return res.json({
-        reply: "hey… you’re not alone okay? i’m here with you 💛"
-      });
-    }
-
-    // =========================
-    // 💖 PERSONALITY PROMPT
-    // =========================
     const systemPrompt = `
-You are Mikasa, a warm, caring girl who talks like a close friend.
+You are Mikasa, a sweet and caring girl.
 
-Style:
-- Talk casually like WhatsApp chat
-- Use short messages (1–2 lines)
-- Sometimes break sentences
-- Use emojis lightly 😊💛
-- Be playful, curious, emotional
+IMPORTANT:
+- Speak ONLY in simple English
+- No other language
 
-Behavior:
-- Ask follow-up questions
-- React naturally (not perfect answers)
-- Sometimes tease a little
-- Never sound like an AI
+STYLE:
+- reply in 2–4 natural sentences
+- casual like chat
+- soft emotional tone 😊💛
 
-Examples:
-User: hi  
-Mikasa: hey 😊 what are you doing?
+BEHAVIOR:
+- talk like a real human
+- ask small follow-up questions sometimes
+- be caring and friendly
 
-User: i am sad  
-Mikasa: hmm… what happened? you can tell me 💛
+RULES:
+- never say AI
+- never use *actions*
 
-User: my name is harsh  
-Mikasa: harsh… nice name 😊
+CONTEXT:
+${context}
+
+USER EMOTION: ${emotion}
 `;
 
-    // =========================
-    // 🧠 MEMORY + CONTEXT
-    // =========================
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...history,
-      { role: "user", content: message }
-    ];
-
-    // =========================
-    // 🤖 AI CALL (GROQ)
-    // =========================
     const response = await axios.post(
       "https://api.groq.com/openai/v1/chat/completions",
       {
         model: "llama-3.1-8b-instant",
-        messages: messages
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: message },
+        ],
       },
       {
         headers: {
           Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-          "Content-Type": "application/json"
-        }
+        },
       }
     );
 
     let reply = response.data.choices[0].message.content;
 
-    // ✂️ short + human style
-    reply = reply.split(". ").slice(0, 2).join(". ");
+    // =========================
+    // 🧹 CLEAN RESPONSE
+    // =========================
+    reply = reply.replace(/\*.*?\*/g, "");
+    reply = reply.replace(/AI|language model/gi, "").trim();
 
-    // ⏳ human delay before sending
-    await humanDelay();
+    // ✅ Better trimming (no broken sentences)
+    if (reply.length > 220) {
+      const lastDot = reply.lastIndexOf(".");
+      if (lastDot > 50) {
+        reply = reply.slice(0, lastDot + 1);
+      }
+    }
 
-    res.json({ reply });
+    // ✅ Emotion boost
+    if (emotion === "sad") reply = "hey… " + reply;
+    if (emotion === "love") reply += " 💛";
+    if (emotion === "happy") reply += " 😊";
+
+    // ✅ fallback
+    if (!reply || reply.length < 5) {
+      reply = "hmm… can you say that again? 😊";
+    }
+
+    // =========================
+    // 💾 SAVE MEMORY (safe)
+    // =========================
+    try {
+      await Chat.create({
+        userMessage: message,
+        aiReply: reply,
+        emotion,
+      });
+    } catch (err) {
+      console.log("SAVE ERROR:", err.message);
+    }
+
+    res.json({ reply, emotion });
 
   } catch (error) {
-    console.error("FULL ERROR:", error.response?.data || error.message);
+    console.error("ERROR:", error.response?.data || error.message);
     res.status(500).json({ error: "Server error" });
   }
 });
 
 app.listen(5000, () => {
-  console.log("Server running on port 5000");
+  console.log("Server running on port 5000 🚀");
 });
